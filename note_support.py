@@ -5,8 +5,10 @@ import base64
 import io
 import os
 import struct
+from collections import defaultdict
 
 ST3072 = int(sublime.version()) >= 3072
+PHANTOMS = defaultdict(set)
 
 def is_enabled_for_view(view):
     valid_syntax = [
@@ -134,9 +136,10 @@ class NoteShowAllImageCommand(sublime_plugin.TextCommand):
             path = v.substr(region)
             data = readImage(v, path)
             html, w, h = genImageHtml(v, data)
-            line_region = v.line(region)
-            v.erase_phantoms(str(region))
-            v.add_phantom(str(region), region, html, sublime.LAYOUT_BLOCK)
+            rid = str(v.line(region))
+            v.erase_phantoms(rid)
+            v.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
+            PHANTOMS[v.id()].add(rid)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
@@ -147,21 +150,31 @@ class NoteHideAllImageCommand(sublime_plugin.TextCommand):
         v = self.view
         img_regs = v.find_by_selector('markup.underline.link.image.markdown')
         for region in img_regs:
-            v.erase_phantoms(str(region))
+            rid = str(v.line(region))
+            v.erase_phantoms(rid)
+            PHANTOMS[v.id()].discard(rid)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
 
-class NotePreviewImageCommand(sublime_plugin.TextCommand):
+class NotePreviewOrHideImageCommand(sublime_plugin.TextCommand):
 
     def run(self, edit):
         v = self.view
         s = v.sel()[0]
-        link_region = v.extract_scope(s.a)
-        path = v.substr(link_region)
-        data = readImage(v, path)
-        html, w, h = genImageHtml(v, data)
-        v.show_popup(html, max_width=w, max_height=h, location=link_region.a)
+        region = v.extract_scope(s.a)
+        rid = str(v.line(region))
+
+        if rid in PHANTOMS[v.id()]:
+            v.erase_phantoms(rid)
+            PHANTOMS[v.id()].discard(rid)
+        else:
+            path = v.substr(region).strip('()')
+            data = readImage(v, path)
+            html, w, h = genImageHtml(v, data)
+            v.erase_phantoms(rid)
+            v.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
+            PHANTOMS[v.id()].add(rid)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)

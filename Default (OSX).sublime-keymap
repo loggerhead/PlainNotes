@@ -11,11 +11,11 @@
 },
 
 { "keys": ["enter"], "command": "note_open_url", "context":
-  [{ "key": "selector", "operator": "equal", "operand": "text.html.markdown.note meta.link.inline.markdown | text.html.markdown.note meta.link.inet.markdown | text.html.markdown.note meta.link.reference.def.markdown" }]
+  [{ "key": "selector", "operator": "equal", "operand": "meta.link.inline.markdown | meta.link.inet.markdown | meta.link.reference.def.markdown" }]
 },
 
-{ "keys": ["enter"], "command": "note_preview_image", "context":
-  [{ "key": "selector", "operator": "equal", "operand": "text.html.markdown.note meta.image.inline.markdown" }]
+{ "keys": ["enter"], "command": "note_preview_or_hide_image", "context":
+  [{ "key": "selector", "operator": "equal", "operand": "meta.image.inline.markdown" }]
 },
 
 // Notes: Jotter keymaps
