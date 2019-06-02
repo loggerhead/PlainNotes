@@ -13,11 +13,9 @@ PHANTOMS = defaultdict(set)
 def is_enabled_for_view(view):
     valid_syntax = [
         'Note.tmLanguage', 'Note.sublime-syntax',
-        'Markdown.sublime-syntax', 'Markdown GFM.sublime-syntax',
-        'MultiMarkdown.sublime-syntax',
     ]
     syntax = view.settings().get("syntax")
-    return any(syntax.endswith(s) for s in valid_syntax)
+    return any(syntax.endswith(s) or 'markdown' in syntax.lower() for s in valid_syntax)
 
 def readImage(view, path):
     data = None
@@ -127,32 +125,25 @@ class NoteOpenUrlCommand(sublime_plugin.TextCommand):
         return is_enabled_for_view(self.view)
 
 # ref: https://github.com/renerocksai/sublime_zk/blob/master/sublime_zk.py#L298-L370
-class NoteShowAllImageCommand(sublime_plugin.TextCommand):
+class NotePreviewOrHideAllImageCommand(sublime_plugin.TextCommand):
 
     def run(self, edit):
         v = self.view
         img_regs = v.find_by_selector('markup.underline.link.image.markdown')
-        for region in img_regs:
-            path = v.substr(region)
-            data = readImage(v, path)
-            html, w, h = genImageHtml(v, data)
-            rid = str(v.line(region))
-            v.erase_phantoms(rid)
-            v.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
-            PHANTOMS[v.id()].add(rid)
+        is_show = len(PHANTOMS[v.id()]) == 0
 
-    def is_enabled(self):
-        return is_enabled_for_view(self.view)
-
-class NoteHideAllImageCommand(sublime_plugin.TextCommand):
-
-    def run(self, edit):
-        v = self.view
-        img_regs = v.find_by_selector('markup.underline.link.image.markdown')
         for region in img_regs:
             rid = str(v.line(region))
-            v.erase_phantoms(rid)
-            PHANTOMS[v.id()].discard(rid)
+            if is_show:
+                path = v.substr(region)
+                data = readImage(v, path)
+                html, w, h = genImageHtml(v, data)
+                v.erase_phantoms(rid)
+                v.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
+                PHANTOMS[v.id()].add(rid)
+            else:
+                v.erase_phantoms(rid)
+                PHANTOMS[v.id()].discard(rid)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)

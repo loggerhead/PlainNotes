@@ -9,6 +9,5 @@
   { "caption": "PlainNotes: Delete"             , "command": "note_remove"       } ,
   { "caption": "PlainNotes: Change Color…"      , "command": "note_change_color" } ,
   { "caption": "PlainNotes: Unarchive…"         , "command": "note_unarchive"    } ,
-  { "caption": "PlainNotes: Show All Images"    , "command": "note_show_all_image"},
-  { "caption": "PlainNotes: Hide All Images"    , "command": "note_hide_all_image"},
+  { "caption": "PlainNotes: Show/Hide All Images", "command": "note_preview_or_hide_all_image"}
 ]
