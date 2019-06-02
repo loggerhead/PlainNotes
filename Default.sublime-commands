@@ -6,8 +6,6 @@
   { "caption": "PlainNotes: Index"              , "command": "notes_buffer"      } ,
   { "caption": "PlainNotes: Rename"             , "command": "note_rename"       } ,
   { "caption": "PlainNotes: Archive"            , "command": "note_archive"      } ,
-  { "caption": "PlainNotes: Delete"             , "command": "note_remove"       } ,
-  { "caption": "PlainNotes: Change Color…"      , "command": "note_change_color" } ,
   { "caption": "PlainNotes: Unarchive…"         , "command": "note_unarchive"    } ,
   { "caption": "PlainNotes: Show/Hide All Images", "command": "note_preview_or_hide_all_image"}
 ]

@@ -17,18 +17,28 @@ def is_enabled_for_view(view):
     syntax = view.settings().get("syntax")
     return any(syntax.endswith(s) or 'markdown' in syntax.lower() for s in valid_syntax)
 
+def getPathType(path):
+    if path.startswith('http://') or path.startswith('https://'):
+        return 'http'
+    elif path.startswith('/'):
+        # absolute path
+        return 'apath'
+    else:
+        # relative path
+        return 'rpath'
+
 def readImage(view, path):
     data = None
-    if path.startswith('http://') or path.startswith('https://'):
+    path_type = getPathType(path)
+    if path_type == 'http':
         req = urllib.request.Request(path)
         r = urllib.request.urlopen(req)
         data = r.read()
-    elif path.startswith('/'):
-        data = open(path, 'rb').read()
     else:
-        basedir = os.path.split(view.file_name())[0]
-        filepath = os.path.join(basedir, path)
-        data = open(filepath, 'rb').read()
+        if path_type == 'rpath':
+            basedir = os.path.split(view.file_name())[0]
+            path = os.path.join(basedir, path)
+        data = open(path, 'rb').read()
     return data
 
 def getPreviewDimensions(w, h, max_w, max_h):
@@ -118,8 +128,16 @@ class NoteOpenUrlCommand(sublime_plugin.TextCommand):
         v = self.view
         s = v.sel()[0]
         link_region = v.extract_scope(s.a)
-        url = v.substr(link_region)
-        webbrowser.open_new_tab(url)
+        path = v.substr(link_region)
+        path_type = getPathType(path)
+
+        if path_type == 'http':
+            webbrowser.open_new_tab(url)
+        else:
+            if path_type == 'apath':
+                basedir = os.path.split(view.file_name())[0]
+                path = os.path.join(basedir, path)
+            sublime.active_window().open_file(path, sublime.ENCODED_POSITION)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
