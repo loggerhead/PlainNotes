@@ -5,17 +5,8 @@
 { "keys": ["super+f4"], "command": "notes_new"    },
 { "keys": ["f1"],       "command": "jotter"       },
 
-// Notes: Index keymaps
-{ "keys": ["enter"], "command": "notes_buffer_open", "context":
-  [{ "key": "selector", "operator": "equal", "operand": "text.notes_buffer" }]
-},
-
-{ "keys": ["enter"], "command": "note_preview_or_hide_image", "context":
-  [{ "key": "selector", "operator": "equal", "operand": "meta.image.inline.markdown" }]
-},
-
-{ "keys": ["enter"], "command": "note_open_url", "context":
-  [{ "key": "selector", "operator": "equal", "operand": "meta.link.inline.markdown | meta.link.inet.markdown | meta.link.reference.def.markdown" }]
+{ "keys": ["enter"], "command": "note_open", "context":
+  [{ "key": "selector", "operator": "equal", "operand": "meta.link.inline.markdown | meta.image.inline.markdown" }]
 },
 
 // Notes: Jotter keymaps
@@ -24,11 +15,6 @@
     { "key": "panel_visible", "operator": "equal", "operand": true },
     { "key": "panel", "operator": "equal", "operand": "output.jotter" }
   ]
-},
-
-// Note Extra Features: TODO and HEADING FOLDING
-{ "keys": ["tab"], "command": "note_smart_folding", "context":
-  [{ "key": "selector", "operator": "equal", "operand": "(markup.heading.1.markdown.note | markup.heading.2.markdown.note | markup.heading.3.markdown.note| markup.heading.4.markdown.note| markup.heading.5.markdown.note| markup.heading.6.markdown.note)" }]
 },
 
 { "keys": ["shift+tab"], "command": "note_global_folding", "context":

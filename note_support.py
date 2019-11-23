@@ -1,14 +1,20 @@
+# https://www.sublimetext.com/docs/3/api_reference.html
 import sublime, sublime_plugin
 import webbrowser
 import urllib.request
 import base64
 import io
 import os
+import re
+import socket
 import struct
+import threading
 from collections import defaultdict
 
 ST3072 = int(sublime.version()) >= 3072
+LOADING_IMAGE_TIMEOUT = 5
 PHANTOMS = defaultdict(set)
+
 
 def is_enabled_for_view(view):
     valid_syntax = [
@@ -17,7 +23,11 @@ def is_enabled_for_view(view):
     syntax = view.settings().get("syntax")
     return any(syntax.endswith(s) or 'markdown' in syntax.lower() for s in valid_syntax)
 
-def getPathType(path):
+def is_image_suffix(path):
+    suffix = os.path.splitext(path)[-1].lower().strip('.')
+    return suffix in ['png', 'jpg', 'jpeg', 'gif']
+
+def get_path_type(path):
     if path.startswith('http://') or path.startswith('https://'):
         return 'http'
     elif path.startswith('/'):
@@ -27,36 +37,59 @@ def getPathType(path):
         # relative path
         return 'rpath'
 
+# remove '\' char from path
 def unescape_path(path):
     return path.replace('\\', '')
 
-def warningIfPathNotExists(path):
+def alert_if_path_not_exists(path):
     is_exists = os.path.exists(path)
     if not is_exists:
         sublime.error_message("not found '%s'" % path)
     return is_exists
 
-def readImage(view, path):
+def read_image(view, path):
+    if not is_image_suffix(path):
+        print("'%s' is not image" % path)
+        return
+    # cache all loaded images
+    cached_datas = getattr(view, "__cached__", {})
+    # read image from cache
+    if path in cached_datas:
+        return cached_datas.get(path)
+
+    # if any exception raised, let it go
     data = None
-    path_type = getPathType(path)
-    # if exception raised, let it go
-    if path_type == 'http':
-        view.set_status("loading_image", "loading image '%s'..." % path)
-        req = urllib.request.Request(path)
-        r = urllib.request.urlopen(req)
-        data = r.read()
-    else:
-        if path_type == 'rpath':
-            basedir = os.path.split(view.file_name())[0]
-            path = os.path.join(basedir, path)
-        path = unescape_path(path)
-        if not warningIfPathNotExists(path):
-            return data
-        data = open(path, 'rb').read()
+    path_type = get_path_type(path)
+    # show loading message in status bar
+    view.set_status("loading_image", "loading image '%s'..." % path)
+
+    # read image data from HTTP
+    try:
+        if path_type == 'http':
+            req = urllib.request.Request(path)
+            r = urllib.request.urlopen(req, timeout=LOADING_IMAGE_TIMEOUT)
+            data = r.read()
+            # cache data
+            cached_datas[path] = data
+            setattr(view, "__cached__", cached_datas)
+        # read image data from local file
+        else:
+            if path_type == 'rpath':
+                basedir = os.path.split(view.file_name())[0]
+                path = os.path.join(basedir, path)
+            # remove '\' char from path
+            path = unescape_path(path)
+            if not alert_if_path_not_exists(path):
+                return None
+            data = open(path, 'rb').read()
+    except socket.timeout:
+        sublime.error_message("open image '%s' timeout!" % path)
+
+    # remove loading message in status bar
     view.erase_status("loading_image")
     return data
 
-def getPreviewDimensions(w, h, max_w, max_h):
+def get_preview_dimensions(w, h, max_w, max_h):
     if w <= max_w:
         return (w, h)
 
@@ -70,8 +103,7 @@ def getPreviewDimensions(w, h, max_w, max_h):
         width = height * ratio
     return (width, height)
 
-def getImageInfo(data):
-    data = data
+def get_image_info(data):
     size = len(data)
     height = -1
     width = -1
@@ -129,87 +161,115 @@ def getImageInfo(data):
 
     return content_type, width, height
 
-def genImageHtml(view, data):
+def gen_image_html(view, data):
     b64 = base64.b64encode(data)
-    mime, w, h = getImageInfo(data)
+    mime, w, h = get_image_info(data)
     max_w, max_h = view.viewport_extent()
-    win_w, win_h = getPreviewDimensions(w, h, max_w, max_h)
+    win_w, win_h = get_preview_dimensions(w, h, max_w, max_h)
     html = '''
         <style>body, html {{margin: 0; padding: 0}}</style>
         <img width="{width}" height="{height}" src="data:image/png;base64,{data}">
     '''.format(width=win_w, height=win_h, data=b64.decode('utf-8'))
     return html, win_w, win_h
 
-class NoteOpenUrlCommand(sublime_plugin.TextCommand):
-
-    def run(self, edit):
-        v = self.view
-        s = v.sel()[0]
-        link_region = v.extract_scope(s.a)
-        path = v.substr(link_region)
-        path_type = getPathType(path)
-
-        if path_type == 'http':
-            webbrowser.open_new_tab(path)
-        else:
-            if path_type == 'rpath':
-                basedir = os.path.split(v.file_name())[0]
-                path = os.path.join(basedir, path)
-            path = unescape_path(path)
-            if not warningIfPathNotExists(path):
-                return
-            sublime.active_window().open_file(path, sublime.ENCODED_POSITION)
-
-    def is_enabled(self):
-        return is_enabled_for_view(self.view)
 
 # preview image base handler
 class PreviewImageBaseHandler(sublime_plugin.TextCommand):
-    def get_view_id(self, view, region):
-        return str(view.line(region))
 
-    def preview(self, view, region):
-        rid = self.get_view_id(view, region)
-        path = view.substr(region).strip('()')
-        data = readImage(view, path)
-        html, w, h = genImageHtml(view, data)
-        view.erase_phantoms(rid)
-        view.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
-        PHANTOMS[view.id()].add(rid)
+    # return region of scope
+    def get_selection_belong_scope(self):
+        return self.view.extract_scope(self.view.sel()[0].a)
 
-    def hide(self, view, region):
-        rid = self.get_view_id(view, region)
-        view.erase_phantoms(rid)
-        PHANTOMS[view.id()].discard(rid)
+    def get_view_id(self, region):
+        return str(self.view.line(region))
+
+    def preview(self, region):
+        def doPreview():
+            # get image path from region
+            path = self.view.substr(region)
+            m = re.match('.*\[.*\]\((.*)\).*', path)
+            if m:
+                path = m.group(1)
+            # read image data
+            data = read_image(self.view, path)
+            if not data:
+                return
+            html, w, h = gen_image_html(self.view, data)
+            rid = self.get_view_id(region)
+            self.view.erase_phantoms(rid)
+            self.view.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
+            PHANTOMS[self.view.id()].add(rid)
+        # async load image
+        t = threading.Thread(target=doPreview)
+        t.start()
+        return t
+
+    def hide(self, region):
+        rid = self.get_view_id(region)
+        self.view.erase_phantoms(rid)
+        PHANTOMS[self.view.id()].discard(rid)
 
 # ref: https://github.com/renerocksai/sublime_zk/blob/master/sublime_zk.py#L298-L370
 class NotePreviewOrHideAllImageCommand(PreviewImageBaseHandler):
 
     def run(self, edit):
-        v = self.view
-        img_regs = v.find_by_selector('markup.underline.link.image.markdown')
-        is_show = (len(PHANTOMS[v.id()]) == 0)
+        img_regs = self.view.find_by_selector('meta.image.inline.markdown')
+        link_regs = self.view.find_by_selector('meta.link.inline.markdown')
+        regs = img_regs + link_regs
+        self.view.set_status("loading_all", "loading all %d images..." % len(regs))
 
-        for region in img_regs:
+        # all preview threads
+        tt = []
+        is_show = (len(PHANTOMS[self.view.id()]) == 0)
+        for region in regs:
             if is_show:
-                sublime.set_timeout_async(lambda: self.preview(v, region))
+                tt.append(self.preview(region))
             else:
-                self.hide(v, region)
+                self.hide(region)
+
+        def wait_all_preview_threads():
+            for t in tt:
+                t.join()
+                self.view.set_status("loading_all", "loading all images finished")
+        sublime.set_timeout_async(wait_all_preview_threads)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
 
-class NotePreviewOrHideImageCommand(PreviewImageBaseHandler):
+class NoteOpenCommand(PreviewImageBaseHandler):
+
+    def open_image(self, region):
+        rid = self.get_view_id(region)
+        is_show = (rid not in PHANTOMS[self.view.id()])
+        if is_show:
+            self.preview(region)
+        else:
+            self.hide(region)
+
+    def open_web(self, path):
+        webbrowser.open_new_tab(path)
+
+    # open local file with sublime
+    def open_file(self, path):
+        path = unescape_path(path)
+        if not alert_if_path_not_exists(path):
+            return
+        sublime.active_window().open_file(path, sublime.ENCODED_POSITION)
 
     def run(self, edit):
-        v = self.view
-        region = v.extract_scope(v.sel()[0].a)
-        rid = self.get_view_id(v, region)
-        is_show = (rid not in PHANTOMS[v.id()])
-        if is_show:
-            sublime.set_timeout_async(lambda: self.preview(v, region))
+        region = self.get_selection_belong_scope()
+        path = self.view.substr(region)
+        path_type = get_path_type(path)
+
+        if is_image_suffix(path):
+            self.open_image(region)
+        elif path_type == 'http':
+            self.open_web(path)
         else:
-            self.hide(v, region)
+            if path_type == 'rpath':
+                basedir = os.path.split(self.view.file_name())[0]
+                path = os.path.join(basedir, path)
+            self.open_file(path)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
