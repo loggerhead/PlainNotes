@@ -27,10 +27,21 @@ def getPathType(path):
         # relative path
         return 'rpath'
 
+def unescape_path(path):
+    return path.replace('\\', '')
+
+def warningIfPathNotExists(path):
+    is_exists = os.path.exists(path)
+    if not is_exists:
+        sublime.error_message("not found '%s'" % path)
+    return is_exists
+
 def readImage(view, path):
     data = None
     path_type = getPathType(path)
+    # if exception raised, let it go
     if path_type == 'http':
+        view.set_status("loading_image", "loading image '%s'..." % path)
         req = urllib.request.Request(path)
         r = urllib.request.urlopen(req)
         data = r.read()
@@ -38,10 +49,17 @@ def readImage(view, path):
         if path_type == 'rpath':
             basedir = os.path.split(view.file_name())[0]
             path = os.path.join(basedir, path)
+        path = unescape_path(path)
+        if not warningIfPathNotExists(path):
+            return data
         data = open(path, 'rb').read()
+    view.erase_status("loading_image")
     return data
 
 def getPreviewDimensions(w, h, max_w, max_h):
+    if w <= max_w:
+        return (w, h)
+
     margin = 100
     ratio = w / (h * 1.0)
     if max_w >= max_h:
@@ -132,58 +150,66 @@ class NoteOpenUrlCommand(sublime_plugin.TextCommand):
         path_type = getPathType(path)
 
         if path_type == 'http':
-            webbrowser.open_new_tab(url)
+            webbrowser.open_new_tab(path)
         else:
-            if path_type == 'apath':
-                basedir = os.path.split(view.file_name())[0]
+            if path_type == 'rpath':
+                basedir = os.path.split(v.file_name())[0]
                 path = os.path.join(basedir, path)
+            path = unescape_path(path)
+            if not warningIfPathNotExists(path):
+                return
             sublime.active_window().open_file(path, sublime.ENCODED_POSITION)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
 
+# preview image base handler
+class PreviewImageBaseHandler(sublime_plugin.TextCommand):
+    def get_view_id(self, view, region):
+        return str(view.line(region))
+
+    def preview(self, view, region):
+        rid = self.get_view_id(view, region)
+        path = view.substr(region).strip('()')
+        data = readImage(view, path)
+        html, w, h = genImageHtml(view, data)
+        view.erase_phantoms(rid)
+        view.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
+        PHANTOMS[view.id()].add(rid)
+
+    def hide(self, view, region):
+        rid = self.get_view_id(view, region)
+        view.erase_phantoms(rid)
+        PHANTOMS[view.id()].discard(rid)
+
 # ref: https://github.com/renerocksai/sublime_zk/blob/master/sublime_zk.py#L298-L370
-class NotePreviewOrHideAllImageCommand(sublime_plugin.TextCommand):
+class NotePreviewOrHideAllImageCommand(PreviewImageBaseHandler):
 
     def run(self, edit):
         v = self.view
         img_regs = v.find_by_selector('markup.underline.link.image.markdown')
-        is_show = len(PHANTOMS[v.id()]) == 0
+        is_show = (len(PHANTOMS[v.id()]) == 0)
 
         for region in img_regs:
-            rid = str(v.line(region))
             if is_show:
-                path = v.substr(region)
-                data = readImage(v, path)
-                html, w, h = genImageHtml(v, data)
-                v.erase_phantoms(rid)
-                v.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
-                PHANTOMS[v.id()].add(rid)
+                sublime.set_timeout_async(lambda: self.preview(v, region))
             else:
-                v.erase_phantoms(rid)
-                PHANTOMS[v.id()].discard(rid)
+                self.hide(v, region)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
 
-class NotePreviewOrHideImageCommand(sublime_plugin.TextCommand):
+class NotePreviewOrHideImageCommand(PreviewImageBaseHandler):
 
     def run(self, edit):
         v = self.view
-        s = v.sel()[0]
-        region = v.extract_scope(s.a)
-        rid = str(v.line(region))
-
-        if rid in PHANTOMS[v.id()]:
-            v.erase_phantoms(rid)
-            PHANTOMS[v.id()].discard(rid)
+        region = v.extract_scope(v.sel()[0].a)
+        rid = self.get_view_id(v, region)
+        is_show = (rid not in PHANTOMS[v.id()])
+        if is_show:
+            sublime.set_timeout_async(lambda: self.preview(v, region))
         else:
-            path = v.substr(region).strip('()')
-            data = readImage(v, path)
-            html, w, h = genImageHtml(v, data)
-            v.erase_phantoms(rid)
-            v.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
-            PHANTOMS[v.id()].add(rid)
+            self.hide(v, region)
 
     def is_enabled(self):
         return is_enabled_for_view(self.view)
