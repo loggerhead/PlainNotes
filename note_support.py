@@ -233,6 +233,7 @@ class PreviewImageBaseHandler(sublime_plugin.TextCommand):
             self.view.erase_phantoms(rid)
             self.view.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
             PHANTOMS[self.view.id()].add(rid)
+            self.view.show_at_center(region)
         # async load image
         t = threading.Thread(target=doPreview)
         t.start()
@@ -247,6 +248,7 @@ class PreviewImageBaseHandler(sublime_plugin.TextCommand):
 class NotePreviewOrHideAllImageCommand(PreviewImageBaseHandler):
 
     def run(self, edit):
+        current_point = self.get_selection_point()
         img_regs = self.view.find_by_selector('meta.image.inline.markdown')
         link_regs = self.view.find_by_selector('meta.link.inline.markdown')
         regs = img_regs + link_regs
@@ -267,6 +269,7 @@ class NotePreviewOrHideAllImageCommand(PreviewImageBaseHandler):
             for t in tt:
                 t.join()
                 self.view.set_status("loading_image", "loading all images finished")
+            self.view.show_at_center(current_point)
         sublime.set_timeout_async(wait_all_preview_threads)
 
     def is_enabled(self):
