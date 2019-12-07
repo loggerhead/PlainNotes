@@ -14,185 +14,229 @@ from collections import defaultdict
 
 ST3072 = int(sublime.version()) >= 3072
 LOADING_IMAGE_TIMEOUT = 5
-PHANTOMS = defaultdict(set)
-
-
-def is_enabled_for_view(view):
-    valid_syntax = [
-        'Note.tmLanguage', 'Note.sublime-syntax',
-    ]
-    syntax = view.settings().get("syntax")
-    return any(syntax.endswith(s) or 'markdown' in syntax.lower() for s in valid_syntax)
-
-def is_image_suffix(path):
-    suffix = os.path.splitext(path)[-1].lower().strip('.')
-    return suffix in ['png', 'jpg', 'jpeg', 'gif']
-
-def get_path_type(path):
-    if path.startswith('http://') or path.startswith('https://'):
-        return 'http'
-    elif path.startswith('/'):
-        # absolute path
-        return 'apath'
-    else:
-        # relative path
-        return 'rpath'
-
-# remove '\' char from path
-def unescape_path(path):
-    return path.replace('\\', '')
-
-def alert_if_path_not_exists(path):
-    is_exists = os.path.exists(path)
-    if not is_exists:
-        sublime.error_message("not found '%s'" % path)
-    return is_exists
+CACHE = defaultdict(lambda: defaultdict(dict))
 
 def settings():
     return sublime.load_settings('Notes.sublime-settings')
 
-# read image data from HTTP
-def read_image_from_web(view, path):
-    http_proxy = settings().get('http_proxy')
-    https_proxy = settings().get('https_proxy')
-    if http_proxy or https_proxy:
-        req = request.build_opener(request.ProxyHandler({
-            'http': http_proxy,
-            'https': https_proxy,
-        }))
-        r = req.open(path, timeout=LOADING_IMAGE_TIMEOUT)
-    else:
-        req = request.Request(path)
-        r = request.urlopen(req, timeout=LOADING_IMAGE_TIMEOUT)
-    data = r.read()
-    return data
+def get_view_cache(view):
+    return CACHE[view.id()]
 
-# read image data from local file
-def read_image_from_local(view, path):
-    # remove '\' char from path
-    path = unescape_path(path)
-    if not alert_if_path_not_exists(path):
-        return None
-    return open(path, 'rb').read()
+def refresh_phantoms(phantoms):
+    remains = []
+    for _, phantom in phantoms.items():
+        if not phantom.refresh():
+            remains.append(phantom)
+    phantoms.clear()
+    for phantom in remains:
+        phantoms[phantom.id()] = phantom
 
-def read_image(view, path):
-    # cache all loaded images
-    cached_datas = getattr(view, "__cached__", {})
-    # read image from cache
-    if path in cached_datas:
-        return cached_datas.get(path)
+# base class
+class PhantomContent(object):
+    def load(self):
+        raise NotImplementedError()
 
-    # if any exception raised, let it go
-    data = None
-    path_type = get_path_type(path)
-    # show loading message in status bar
-    view.set_status("loading_image", "loading image '%s'..." % path)
+    def gen_html(self, max_w, max_h):
+        raise NotImplementedError()
 
-    try:
-        if path_type == 'http':
-            data = read_image_from_web(view, path)
-            # cache data
-            cached_datas[path] = data
-            setattr(view, "__cached__", cached_datas)
+class Path(object):
+    @staticmethod
+    def remove_backslash(path):
+        return path.replace('\\', '')
+
+    @staticmethod
+    def is_url(path):
+        return path.startswith('http://') or path.startswith('https://')
+
+    @staticmethod
+    def is_image(path):
+        suffix = os.path.splitext(path)[-1].lower().strip('.')
+        return suffix in ['png', 'jpg', 'jpeg', 'gif']
+
+    @staticmethod
+    def get_abspath(view, path):
+        basedir = os.path.split(os.path.abspath(view.file_name()))[0]
+        abspath = os.path.join(basedir, path)
+        if os.path.exists(abspath):
+            return abspath
         else:
-            if path_type == 'rpath':
-                basedir = os.path.split(view.file_name())[0]
-                path = os.path.join(basedir, path)
-            data = read_image_from_local(view, path)
-    except (socket.timeout, urllib.error.URLError):
-        sublime.error_message("open image '%s' timeout!" % path)
+            return os.path.abspath(path)
 
-    # remove loading message in status bar
-    view.erase_status("loading_image")
-    return data
+    @staticmethod
+    def get_abspath_if_not_url(view, path):
+        path = Path.remove_backslash(path)
+        if not Path.is_url(path):
+            path = Path.get_abspath(view, path)
+        return path
 
-def get_preview_dimensions(w, h, max_w, max_h):
-    if w <= max_w:
-        return (w, h)
 
-    margin = 100
-    ratio = w / (h * 1.0)
-    if max_w >= max_h:
-        width = (max_w - margin)
-        height = width / ratio
-    else:
-        height = (max_h - margin)
-        width = height * ratio
-    return (width, height)
+class Image(PhantomContent):
+    def __init__(self, path):
+        self.path = path
+        self.data_in_base64 = None
+        self.width = None
+        self.height = None
+        self.content_type = None
 
-def get_image_info(data):
-    size = len(data)
-    height = -1
-    width = -1
-    content_type = ''
-
-    # handle GIFs
-    if (size >= 10) and data[:6] in (b'GIF87a', b'GIF89a'):
-        # Check to see if content_type is correct
-        content_type = 'image/gif'
-        w, h = struct.unpack(b"<HH", data[6:10])
-        width = int(w)
-        height = int(h)
-
-    # See PNG 2. Edition spec (http://www.w3.org/TR/PNG/)
-    # Bytes 0-7 are below, 4-byte chunk length, then 'IHDR'
-    # and finally the 4-byte width, height
-    elif ((size >= 24) and data.startswith(b'\211PNG\r\n\032\n') and
-          (data[12:16] == b'IHDR')):
-        content_type = 'image/png'
-        w, h = struct.unpack(b">LL", data[16:24])
-        width = int(w)
-        height = int(h)
-
-    # Maybe this is for an older PNG version.
-    elif (size >= 16) and data.startswith(b'\211PNG\r\n\032\n'):
-        # Check to see if we have the right content type
-        content_type = 'image/png'
-        w, h = struct.unpack(b">LL", data[8:16])
-        width = int(w)
-        height = int(h)
-
-    # handle JPEGs
-    elif (size >= 2) and data.startswith(b'\377\330'):
-        content_type = 'image/jpeg'
-        jpeg = io.BytesIO(data)
-        jpeg.read(2)
-        b = jpeg.read(1)
+    def load(self):
+        data = None
         try:
-            while (b and ord(b) != 0xDA):
-                while (ord(b) != 0xFF): b = jpeg.read(1)
-                while (ord(b) == 0xFF): b = jpeg.read(1)
-                if (ord(b) >= 0xC0 and ord(b) <= 0xC3):
-                    jpeg.read(3)
-                    h, w = struct.unpack(b">HH", jpeg.read(4))
-                    break
+            # load from URL
+            if Path.is_url(self.path):
+                http_proxy = settings().get('http_proxy')
+                https_proxy = settings().get('https_proxy')
+                if http_proxy or https_proxy:
+                    req = request.build_opener(request.ProxyHandler({
+                        'http': http_proxy,
+                        'https': https_proxy,
+                    }))
+                    r = req.open(self.path, timeout=LOADING_IMAGE_TIMEOUT)
                 else:
-                    jpeg.read(int(struct.unpack(b">H", jpeg.read(2))[0])-2)
-                b = jpeg.read(1)
+                    req = request.Request(self.path)
+                    r = request.urlopen(req, timeout=LOADING_IMAGE_TIMEOUT)
+                data = r.read()
+            # load from local file
+            else:
+                data = open(self.path, 'rb').read()
+        except (socket.timeout, urllib.error.URLError):
+            sublime.error_message("open image '%s' timeout!" % self.path)
+        except (OSError, IOError):
+            sublime.error_message("open image '%s' failed!" % self.path)
+        except Exception as e:
+            sublime.error_message("open image failed! %s" % e)
+            raise e
+        finally:
+            if not data:
+                return False
+            self.content_type, self.width, self.height = self._get_info(data)
+            self.data_in_base64 = base64.b64encode(data).decode('utf-8')
+        return True
+
+    # max_w, max_h = view.viewport_extent()
+    def gen_html(self, max_w, max_h):
+        win_w, win_h = self._get_preview_dimensions(max_w, max_h)
+        html = '''<style>body, html {{margin: 0; padding: 0}}</style>
+            <img width="{width}" height="{height}" src="data:{content_type};base64,{data}">
+        '''.format(
+            width=win_w,
+            height=win_h,
+            content_type=self.content_type,
+            data=self.data_in_base64,
+        )
+        return html
+
+    def _get_preview_dimensions(self, max_w, max_h):
+        if self.width <= max_w:
+            return (self.width, self.height)
+
+        margin = 100
+        ratio = self.width / (self.height * 1.0)
+        if max_w >= max_h:
+            width = (max_w - margin)
+            height = width / ratio
+        else:
+            height = (max_h - margin)
+            width = height * ratio
+        return (width, height)
+
+    def _get_info(self, data):
+        size = len(data)
+        height = -1
+        width = -1
+        content_type = ''
+
+        if not data or not size:
+            return None, None, None
+
+        # handle GIFs
+        if (size >= 10) and data[:6] in (b'GIF87a', b'GIF89a'):
+            # Check to see if content_type is correct
+            content_type = 'image/gif'
+            w, h = struct.unpack(b"<HH", data[6:10])
             width = int(w)
             height = int(h)
-        except struct.error:
-            pass
-        except ValueError:
-            pass
+        # See PNG 2. Edition spec (http://www.w3.org/TR/PNG/)
+        # Bytes 0-7 are below, 4-byte chunk length, then 'IHDR'
+        # and finally the 4-byte width, height
+        elif ((size >= 24) and data.startswith(b'\211PNG\r\n\032\n') and
+              (data[12:16] == b'IHDR')):
+            content_type = 'image/png'
+            w, h = struct.unpack(b">LL", data[16:24])
+            width = int(w)
+            height = int(h)
+        # Maybe this is for an older PNG version.
+        elif (size >= 16) and data.startswith(b'\211PNG\r\n\032\n'):
+            # Check to see if we have the right content type
+            content_type = 'image/png'
+            w, h = struct.unpack(b">LL", data[8:16])
+            width = int(w)
+            height = int(h)
+        # handle JPEGs
+        elif (size >= 2) and data.startswith(b'\377\330'):
+            content_type = 'image/jpeg'
+            jpeg = io.BytesIO(data)
+            jpeg.read(2)
+            b = jpeg.read(1)
+            try:
+                while (b and ord(b) != 0xDA):
+                    while (ord(b) != 0xFF): b = jpeg.read(1)
+                    while (ord(b) == 0xFF): b = jpeg.read(1)
+                    if (ord(b) >= 0xC0 and ord(b) <= 0xC3):
+                        jpeg.read(3)
+                        h, w = struct.unpack(b">HH", jpeg.read(4))
+                        break
+                    else:
+                        jpeg.read(int(struct.unpack(b">H", jpeg.read(2))[0])-2)
+                    b = jpeg.read(1)
+                width = int(w)
+                height = int(h)
+            except struct.error:
+                pass
+            except ValueError:
+                pass
+        return content_type, width, height
 
-    return content_type, width, height
+    def __str__(self):
+        return self.path
 
-def gen_image_html(view, data):
-    b64 = base64.b64encode(data)
-    mime, w, h = get_image_info(data)
-    max_w, max_h = view.viewport_extent()
-    win_w, win_h = get_preview_dimensions(w, h, max_w, max_h)
-    html = '''
-        <style>body, html {{margin: 0; padding: 0}}</style>
-        <img width="{width}" height="{height}" src="data:image/png;base64,{data}">
-    '''.format(width=win_w, height=win_h, data=b64.decode('utf-8'))
-    return html, win_w, win_h
+class Phantom(object):
+    def __init__(self, view, region, phantom_content):
+        self.view = view
+        self.region = region
+        self.rpos = (region.a, region.b, region.xpos)
+        self.region_str = view.substr(region)
+        self.phantom_content = phantom_content
 
+    def preview(self, max_w, max_h):
+        html = self.phantom_content.gen_html(max_w, max_h)
+        self.view.add_phantom(self.id(), self.region, html, sublime.LAYOUT_BLOCK)
 
-# preview image base handler
-class PreviewImageBaseHandler(sublime_plugin.TextCommand):
+    def hide(self):
+        self.view.erase_phantoms(self.id())
 
+    def refresh(self, phantom_content=None):
+        is_modified = (self.view.substr(self.region) != self.region_str)
+        if is_modified:
+            self.hide()
+        if phantom_content:
+            self.phantom_content = phantom_content
+        return is_modified
+
+    def id(self):
+        return str((self.region_str, self.rpos))
+
+    @classmethod
+    def compute_phantom_id(cls, view, region):
+        return Phantom(view, region, None).id()
+
+    def __hash__(self):
+        return self.id()
+
+    def __eq__(self, o):
+        return self.id() == o.id()
+
+class _MarkdownBaseCommand(sublime_plugin.TextCommand):
+    # preview image base handler
     def get_selection_point(self):
         return self.view.sel()[0].a
 
@@ -200,15 +244,8 @@ class PreviewImageBaseHandler(sublime_plugin.TextCommand):
     def get_selection_belong_scope(self):
         return self.view.extract_scope(self.get_selection_point())
 
-    def get_scope_name(self, region):
-        return self.view.scope_name(region.a)
-
-    def is_image_scope(self, region):
-        return 'image' in self.get_scope_name(region)
-
-    def is_image(self, region):
-        path = self.get_path_from_region(region)
-        return self.is_image_scope(region) or is_image_suffix(path)
+    def get_image_region_by_subregion(self, region):
+        return self.view.line(region)
 
     def get_path_from_region(self, region):
         path = self.view.substr(region)
@@ -218,97 +255,155 @@ class PreviewImageBaseHandler(sublime_plugin.TextCommand):
         path = re.sub("[\(\)]", "", path)
         return path
 
-    def get_view_id(self, region):
-        return str(self.view.line(region))
+    @property
+    def cache(self):
+        return get_view_cache(self.view)
 
-    def preview(self, region):
-        def doPreview():
-            path = self.get_path_from_region(region)
-            # read image data
-            data = read_image(self.view, path)
-            if not data:
+    @property
+    def phantoms(self):
+        return self.cache['__PHANTOMS__']
+
+    @property
+    def phantom_contents(self):
+        return self.cache['__PHANTOM_CONTENTS__']
+
+    def run(self, edit):
+        raise NotImplementedError()
+
+    def is_enabled(self):
+        valid_syntax = [
+            'Note.tmLanguage', 'Note.sublime-syntax',
+        ]
+        syntax = self.view.settings().get("syntax")
+        return any(syntax.endswith(s) or 'markdown' in syntax.lower() for s in valid_syntax)
+
+    # is_preview:
+    #   None: preview or hide
+    #   True: preview
+    #   False: hide
+    def preview_or_hide_image(self, path, region, is_preview=None):
+        phantom_id = Phantom.compute_phantom_id(self.view, region)
+        if is_preview is None:
+            is_preview = (phantom_id not in self.phantoms)
+
+        def preview():
+            self.view.set_status(path, "loading image '%s'..." % path)
+            if path in self.phantom_contents:
+                image_content = self.phantom_contents[path]
+            else:
+                image_content = Image(path)
+                if not image_content.load():
+                    self.view.erase_status(path)
+                    return
+                self.phantom_contents[path] = image_content
+
+            if phantom_id in self.phantoms:
+                phantom = self.phantoms[phantom_id]
+            else:
+                phantom = Phantom(self.view, region, image_content)
+                self.phantoms[phantom.id()] = phantom
+
+            max_w, max_h = self.view.viewport_extent()
+            phantom.preview(max_w, max_h)
+            self.view.erase_status(path)
+
+        def hide():
+            if phantom_id not in self.phantoms:
                 return
-            html, w, h = gen_image_html(self.view, data)
-            rid = self.get_view_id(region)
-            self.view.erase_phantoms(rid)
-            self.view.add_phantom(rid, region, html, sublime.LAYOUT_BLOCK)
-            PHANTOMS[self.view.id()].add(rid)
-            self.view.show_at_center(region)
-        # async load image
-        t = threading.Thread(target=doPreview)
+            phantom = self.phantoms[phantom_id]
+            phantom.hide()
+            self.phantoms.pop(phantom.id(), None)
+
+        target_func = (preview if is_preview else hide)
+        t = threading.Thread(target=target_func)
         t.start()
         return t
 
-    def hide(self, region):
-        rid = self.get_view_id(region)
-        self.view.erase_phantoms(rid)
-        PHANTOMS[self.view.id()].discard(rid)
-
 # ref: https://github.com/renerocksai/sublime_zk/blob/master/sublime_zk.py#L298-L370
-class NotePreviewOrHideAllImageCommand(PreviewImageBaseHandler):
-
+class NotePreviewOrHideAllImageCommand(_MarkdownBaseCommand):
     def run(self, edit):
-        current_point = self.get_selection_point()
+        refresh_phantoms(self.phantoms)
+        # local variables
         img_regs = self.view.find_by_selector('meta.image.inline.markdown')
         link_regs = self.view.find_by_selector('meta.link.inline.markdown')
-        regs = img_regs + link_regs
-        self.view.set_status("loading_image", "loading all %d images..." % len(regs))
-
-        # all preview threads
+        is_preview = (len(self.phantoms) == 0)
         tt = []
-        is_show = (len(PHANTOMS[self.view.id()]) == 0)
-        for region in regs:
-            if not self.is_image(region):
-                continue
-            if is_show:
-                tt.append(self.preview(region))
-            else:
-                self.hide(region)
 
+        # preview or hide all images
+        for region in img_regs:
+            region = self.get_image_region_by_subregion(region)
+            path = self.get_path_from_region(region)
+            path = Path.get_abspath_if_not_url(self.view, path)
+            t = self.preview_or_hide_image(path, region, is_preview)
+            tt.append(t)
+
+        # preview or hide all images for link scope
+        for region in link_regs:
+            region = self.get_image_region_by_subregion(region)
+            path = self.get_path_from_region(region)
+            path = Path.get_abspath_if_not_url(self.view, path)
+            if not Path.is_image(path):
+                continue
+            t = self.preview_or_hide_image(path, region, is_preview)
+            tt.append(t)
+
+        # reset show position after loading
         def wait_all_preview_threads():
+            current_point = self.get_selection_point()
             for t in tt:
                 t.join()
-                self.view.set_status("loading_image", "loading all images finished")
             self.view.show_at_center(current_point)
         sublime.set_timeout_async(wait_all_preview_threads)
 
-    def is_enabled(self):
-        return is_enabled_for_view(self.view)
+class NoteOpenCommand(_MarkdownBaseCommand):
+    def open_image(self, path, region):
+        self.preview_or_hide_image(path, region)
 
-class NoteOpenCommand(PreviewImageBaseHandler):
-
-    def open_image(self, region):
-        rid = self.get_view_id(region)
-        is_show = (rid not in PHANTOMS[self.view.id()])
-        if is_show:
-            self.preview(region)
-        else:
-            self.hide(region)
-
-    def open_web(self, path):
+    def open_web(self, path, region):
         webbrowser.open_new_tab(path)
 
-    # open local file with sublime
-    def open_file(self, path):
-        path = unescape_path(path)
-        if not alert_if_path_not_exists(path):
-            return
+    def open_file(self, path, region):
+        if not os.path.exists(path):
+            raise FileNotFoundError()
         sublime.active_window().open_file(path, sublime.ENCODED_POSITION)
 
     def run(self, edit):
-        region = self.get_selection_belong_scope()
+        region = self.get_image_region_by_subregion(self.get_selection_belong_scope())
         path = self.get_path_from_region(region)
-        path_type = get_path_type(path)
+        path = Path.get_abspath_if_not_url(self.view, path)
 
-        if self.is_image(region):
-            self.open_image(region)
-        elif path_type == 'http':
-            self.open_web(path)
-        else:
-            if path_type == 'rpath':
-                basedir = os.path.split(self.view.file_name())[0]
-                path = os.path.join(basedir, path)
-            self.open_file(path)
+        try:
+            if Path.is_url(path):
+                if self.view.match_selector(region.a, 'meta.image.inline.markdown'):
+                    self.open_image(path, region)
+                else:
+                    self.open_web(path, region)
+            else:
+                if Path.is_image(path):
+                    self.open_image(path, region)
+                else:
+                    self.open_file(path, region)
+        except:
+            sublime.error_message("open '%s' failed!" % path)
+            raise
 
-    def is_enabled(self):
-        return is_enabled_for_view(self.view)
+class NotePasteImageCommand(_MarkdownBaseCommand):
+    def run(self, edit):
+        from PIL import ImageGrab
+
+        dirpath, filename = os.path.split(os.path.abspath(self.view.file_name()))
+        imgpath = os.path.join(dirpath, '%s.png' % filename)
+        im = ImageGrab.grabclipboard()
+        im.save(imgpath,'PNG')
+
+class PhantomModifyEventHandler(sublime_plugin.ViewEventListener):
+    @property
+    def cache(self):
+        return get_view_cache(self.view)
+
+    @property
+    def phantoms(self):
+        return self.cache['__PHANTOMS__']
+
+    def on_modified_async(self):
+        refresh_phantoms(self.phantoms)

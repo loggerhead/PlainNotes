@@ -7,5 +7,6 @@
   { "caption": "PlainNotes: Rename"             , "command": "note_rename"       } ,
   { "caption": "PlainNotes: Archive"            , "command": "note_archive"      } ,
   { "caption": "PlainNotes: Unarchive…"         , "command": "note_unarchive"    } ,
-  { "caption": "PlainNotes: Show/Hide All Images", "command": "note_preview_or_hide_all_image"}
+  { "caption": "PlainNotes: Show/Hide all images", "command": "note_preview_or_hide_all_image"},
+  { "caption": "PlainNotes: Paste image from clipboard", "command": "note_paste_image"}
 ]
